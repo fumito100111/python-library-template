@@ -1,0 +1,326 @@
+#!/bin/bash
+
+set -pu
+
+function error() {
+  prefix="${2:-}"
+  exit_code="${3:-}"
+  printf "${RED}${prefix}error:${RESET} $1\n" >&2
+  if [[ -n "$exit_code" ]]; then
+    exit "$exit_code"
+  fi
+}
+
+function sed_i() {
+  case "$(uname -s)" in
+    Darwin*)
+      sed -i '' "$@"
+      ;;
+    *)
+      sed -i "$@"
+      ;;
+  esac
+}
+
+__LICENSES__=(
+  "MIT"
+  "Apache-2.0"
+  "BSD-3-Clause"
+  "GPL-3.0"
+)
+__PYTHON_LATEST_VERSION__="$(curl -s https://endoflife.date/api/python.json | grep -o '"cycle":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+__TEMPLATES_DIR__="$(cd "$(dirname "$0")" && pwd)/.templates"
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+RESET='\033[0m'
+
+# Get user input for project name
+prompt="project name (e.g. MyLibrary)"
+padding="${prompt//?/ }"
+while true;
+do
+  read -p "$prompt: " project_name
+  if [[ "$project_name" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ ]]; then
+    break
+  else
+    error "invalid project name (alphanumeric, underscores, or hyphens, starting with a letter)" "${padding}  ↳ "
+  fi
+done
+
+# Get user input for library name
+prompt="library name (e.g. mylibrary, my_library)"
+padding="${prompt//?/ }"
+while true;
+do
+  read -p "$prompt: " library_name
+  if [[ "$library_name" =~ ^[a-z][a-z0-9_]*$ ]]; then
+    break
+  else
+    error "invalid library name (lowercase letters, numbers, or underscores, starting with a letter)" "${padding}  ↳ "
+  fi
+done
+
+# Get user input for library description
+prompt="library description (e.g. A Python library for ...) [Enter to skip]"
+read -p "$prompt: " library_description
+
+# Get user input for Python minimum version compatibility
+prompt="Python minimum version (e.g. 3.12) [Enter to skip]"
+padding="${prompt//?/ }"
+while true;
+do
+  read -p "$prompt: " python_min_version
+  if [[ -z "$python_min_version" ]]; then
+    python_min_version=""
+    break
+  elif [[ ! "$python_min_version" =~ ^3\.[0-9]+$ ]]; then
+    error "invalid Python version (must be in the format 3.x)" "${padding}  ↳ "
+  elif [[ "${python_min_version#3.}" -gt "${__PYTHON_LATEST_VERSION__#3.}" ]]; then
+    error "invalid Python version (must be less than or equal to ${__PYTHON_LATEST_VERSION__})" "${padding}  ↳ "
+  else
+    break
+  fi
+done
+
+# Get user input for Python maximum version compatibility
+prompt="Python maximum version (e.g. ${__PYTHON_LATEST_VERSION__}) [Enter to skip]"
+padding="${prompt//?/ }"
+while true;
+do
+  read -p "$prompt: " python_max_version
+  if [[ -z "$python_max_version" ]]; then
+    python_max_version=""
+    break
+  elif [[ ! "$python_max_version" =~ ^3\.[0-9]+$ ]]; then
+    error "invalid Python version (must be in the format 3.x)" "${padding}  ↳ "
+  elif [[ "${python_max_version#3.}" -gt "${__PYTHON_LATEST_VERSION__#3.}" ]]; then
+    error "invalid Python version (must be less than or equal to ${__PYTHON_LATEST_VERSION__})" "${padding}  ↳ "
+  elif [[ -n "$python_min_version" && "${python_max_version#3.}" -lt "${python_min_version#3.}" ]]; then
+    error "invalid Python version (must be greater than or equal to the minimum version)" "${padding}  ↳ "
+  else
+    break
+  fi
+done
+
+requires_python=""
+if [[ -n "$python_min_version" && -n "$python_max_version" ]]; then
+  if [[ "$python_min_version" == "$python_max_version" ]]; then
+    requires_python="==${python_min_version}"
+  else
+    requires_python=">=${python_min_version}, <=${python_max_version}"
+  fi
+elif [[ -n "$python_min_version" ]]; then
+  requires_python=">=${python_min_version}"
+elif [[ -n "$python_max_version" ]]; then
+  requires_python="<=${python_max_version}"
+fi
+
+# Get user input for library license
+licenses=""
+for i in "${!__LICENSES__[@]}"; do
+  if [[ ! -z "$licenses" ]]; then
+    licenses+=", "
+  fi
+  licenses+="$((i + 1)). ${__LICENSES__[$i]}"
+done
+prompt="library license (${licenses}) [Enter to skip]"
+padding="${prompt//?/ }"
+while true;
+do
+  read -p "$prompt: " license_choice
+  if [[ -z "$license_choice" ]]; then
+    license=""
+    break
+  elif [[ ! "$license_choice" =~ ^[1-9][0-9]*$ ]] || [[ "$license_choice" -gt "${#__LICENSES__[@]}" ]]; then
+    error "invalid choice (must be a number between 1 and ${#__LICENSES__[@]})" "${padding}  ↳ "
+  else
+    license="${__LICENSES__[$((license_choice - 1))]}"
+    break
+  fi
+done
+license_description=""
+case "$license" in
+  "")
+    license_description="This project is not licensed."
+    ;;
+  *)
+    license_description="This project is licensed under the \`${license} License\`. See the [\`LICENSE\`](LICENSE) file for details."
+esac
+
+# Get user input for author name to LICENSE (only if license is specified)
+if [[ -n "$license" ]]; then
+  prompt="author name (e.g. Taro Yamada)"
+  padding="${prompt//?/ }"
+  while true;
+  do
+    read -p "$prompt: " author_name
+    if [[ ! "$author_name" =~ ^[a-zA-Z][a-zA-Z\ ]*$ ]]; then
+      error "invalid author name (must be alphabetic characters and spaces)" "${padding}  ↳ "
+    else
+      break
+    fi
+  done
+else
+  author_name=""
+fi
+
+# Get user input for dependencies
+prompt="dependencies for ${library_name} (space-separated, e.g. requests numpy>=x.x.x ...) [Enter to skip]"
+read -p "$prompt: " dependencies_input
+dependencies_input="${dependencies_input//,/ }"
+dependencies=()
+read -ra dependencies <<< "$dependencies_input"
+
+# Get user input for development dependencies
+prompt="development dependencies for ${library_name} (space-separated, e.g. mypy ...) [Enter to skip]"
+read -p "$prompt: " dev_dependencies_input
+dev_dependencies_input="${dev_dependencies_input//,/ }"
+dev_dependencies=()
+read -ra dev_dependencies <<< "$dev_dependencies_input"
+
+# Get user input for test dependencies
+prompt="test dependencies for ${library_name} (space-separated, e.g. pytest ...) [Enter to skip]"
+read -p "$prompt: " test_dependencies_input
+test_dependencies_input="${test_dependencies_input//,/ }"
+test_dependencies=()
+read -ra test_dependencies <<< "$test_dependencies_input"
+
+# Get user input for Dev Container (optional)
+prompt="include Dev Container configuration? (y/n)"
+padding="${prompt//?/ }"
+while true;
+do
+  read -p "$prompt: " include_dev_container
+  if [[ "$include_dev_container" != "y" && "$include_dev_container" != "n" ]]; then
+    error "invalid choice (must be 'y' or 'n')" "${padding}  ↳ "
+  else
+    break
+  fi
+done
+
+# Get user input for GitHub Actions workflow (optional)
+prompt="include GitHub Actions workflow for release? (y/n)"
+padding="${prompt//?/ }"
+while true;
+do  read -p "$prompt: " include_github_actions
+  if [[ "$include_github_actions" != "y" && "$include_github_actions" != "n" ]]; then
+    error "invalid choice (must be 'y' or 'n')" "${padding}  ↳ "
+  else
+    break
+  fi
+done
+
+# Create pyproject.toml
+cat << EOF > pyproject.toml
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+
+[tool.setuptools.packages.find]
+include = ["${library_name}*"]
+exclude = []
+
+[project]
+name = "$library_name"
+dynamic = ["version"]
+description = "${library_description:-}"
+readme = "README.md"
+EOF
+if [[ -n "$requires_python" ]]; then
+  echo "requires-python = \"${requires_python}\"" >> pyproject.toml
+fi
+if [[ ${#dependencies[@]} -eq 0 ]]; then
+  echo "dependencies = []" >> pyproject.toml
+else
+  echo "dependencies = [" >> pyproject.toml
+  for dependency in "${dependencies[@]}"; do
+    echo "  \"${dependency}\"," >> pyproject.toml
+  done
+  echo "]" >> pyproject.toml
+fi
+echo "" >> pyproject.toml
+echo "[project.optional-dependencies]" >> pyproject.toml
+if [[ ${#dev_dependencies[@]} -eq 0 ]]; then
+  echo "dev = []" >> pyproject.toml
+else
+  echo "dev = [" >> pyproject.toml
+  for dev_dependency in "${dev_dependencies[@]}"; do
+    echo "  \"${dev_dependency}\"," >> pyproject.toml
+  done
+  echo "]" >> pyproject.toml
+fi
+if [[ ${#test_dependencies[@]} -eq 0 ]]; then
+  echo "test = []" >> pyproject.toml
+else
+  echo "test = [" >> pyproject.toml
+  for test_dependency in "${test_dependencies[@]}"; do
+    echo "  \"${test_dependency}\"," >> pyproject.toml
+  done
+  echo "]" >> pyproject.toml
+fi
+if [[ -n "$license" ]]; then
+  echo "" >> pyproject.toml
+  echo "[project.license]" >> pyproject.toml
+  echo "text = \"${license}\"" >> pyproject.toml
+fi
+if [[ -n "$author_name" ]]; then
+  echo "" >> pyproject.toml
+  echo "[[project.authors]]" >> pyproject.toml
+  echo "name = \"${author_name}\"" >> pyproject.toml
+fi
+repo_url="$(git remote get-url origin 2>/dev/null || true)"
+repo_base_url="${repo_url%.git}"
+if [[ -n "$repo_base_url" ]]; then
+  echo "" >> pyproject.toml
+  echo "[project.urls]" >> pyproject.toml
+  echo "Homepage = \"${repo_base_url}\"" >> pyproject.toml
+  echo "Repository = \"${repo_base_url}.git\"" >> pyproject.toml
+  echo "Issues = \"${repo_base_url}/issues\"" >> pyproject.toml
+fi
+
+# Create .gitignore
+cp "${__TEMPLATES_DIR__}/.gitignore" .gitignore
+
+# Create README.md
+rm -f README.md
+cp "${__TEMPLATES_DIR__}/README.md" README.md
+sed_i "s;{{ project_name }};${project_name};g" README.md
+sed_i "s;{{ license_description }};${license_description};g" README.md
+
+# Create LICENSE
+rm -f LICENSE
+if [[ -n "$license" ]]; then
+  cp "${__TEMPLATES_DIR__}/licenses/${license}" LICENSE
+  year="$(date +%Y)"
+  sed_i "s;{{ year }};${year};g" LICENSE
+  sed_i "s;{{ author_name }};${author_name};g" LICENSE
+fi
+
+# Create directory for library and __init__.py
+mkdir -p "${library_name}"
+touch "${library_name}/__init__.py"
+
+# Create .devcontainer/devcontainer.json (optional)
+if [[ "$include_dev_container" == "y" ]]; then
+  mkdir -p .devcontainer
+  cp "${__TEMPLATES_DIR__}/.devcontainer/devcontainer.json" .devcontainer/devcontainer.json
+  python_version="${__PYTHON_LATEST_VERSION__}"
+  if [[ -n "$python_min_version" ]]; then
+    python_version="$python_min_version"
+  elif [[ -n "$python_max_version" ]]; then
+    python_version="$python_max_version"
+  fi
+  sed_i "s;{{ python_version }};${python_version};g" .devcontainer/devcontainer.json
+fi
+
+# Create .github/workflows/release.yml (optional)
+if [[ "$include_github_actions" == "y" ]]; then
+  mkdir -p .github/workflows
+  cp "${__TEMPLATES_DIR__}/.github/workflows/prerelease.yml" .github/workflows/prerelease.yml
+  cp "${__TEMPLATES_DIR__}/.github/workflows/stable-release.yml" .github/workflows/stable-release.yml
+fi
+
+# Show success message
+printf "${GREEN}Project setup is complete!${RESET}\n"
