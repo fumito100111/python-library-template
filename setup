@@ -324,3 +324,7 @@ fi
 
 # Show success message
 printf "${GREEN}Project setup is complete!${RESET}\n"
+
+# Remove .templates directory and this setup script
+rm -rf "${__TEMPLATES_DIR__}"
+rm -- "$0"
